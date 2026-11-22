@@ -3,8 +3,11 @@ import { getDb } from '../db/index.js';
 import { getChannel, listChannels, updateChannelConfig, setChannelEnabled, deleteChannel } from '../services/channelRegistry.js';
 import { createToken, listTokens, refreshToken, updateQuota, deleteToken } from '../services/quota.js';
 import { getCircuitStatus } from '../services/circuitBreaker.js';
+import { adminAuth } from '../middleware/adminAuth.js';
 
 const router = express.Router();
+
+router.use(adminAuth);
 
 // 获取所有通道
 router.get('/channels', (req, res) => {

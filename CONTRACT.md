@@ -11,6 +11,10 @@
 | `DB_PATH` | `./data/gateway.db` | SQLite 文件。每人用自己机器上的独立文件，禁止共享、禁止提交 |
 | `OFM_ENDPOINT` | `http://localhost:18900/v1/chat/completions` | 免费通道上游（OFM 独立服务） |
 | `MOCK_PORT` | 18901 | mock channel 端口 |
+| `USE_JEV` | `false` | Jev 语义路由总开关（组员1 接入前保持 false，路由走基础规则） |
+| `ADMIN_TOKEN` | 空 | **已启用**：非空时守护所有 `/api/admin/*`（见 §6）；空=admin 接口开放（仅限本机开发） |
+| `FREE_CHANNEL_RPM` | 30 | 免费通道每分钟请求上限（进程内滑动窗口，保护第三方上游，见 §2） |
+| `QUOTA_WARN_PERCENT` | 80 | 配额使用率达到该百分比时写入一条 warning 告警（仅在跨越阈值那次请求触发，不重复刷） |
 
 ## 1. 数据表（`src/db/schema.sql` 为准，本节为摘要）
 
@@ -41,11 +45,17 @@
 | 码 | 场景 | body.error.type |
 |---|---|---|
 | 401 | 无/无效令牌 | `invalid_request_error` |
-| 403 | 配额超限 | `quota_exceeded` |
-| 429 | 免费通道内部限流 | `rate_limit_error` |
+| 403 | 配额超限（**硬限**：超限直接拒绝，不再兜底走免费通道；响应带 `X-RateLimit-Remaining: 0` 之外的用量头不要求） | `quota_exceeded` |
+| 429 | 免费通道内部限流：目标通道为 free 且 `FREE_CHANNEL_RPM` 窗口已满（含作为 fallback 使用时） | `rate_limit_error` |
 | 500 | 所有候选通道均失败 | `server_error`，`message` 含各候选失败原因 |
 
-## 3. 管理接口 `/api/admin`（Phase 1 无鉴权，Phase 2 统一加 `x-admin-token`，见 §6）
+免费通道限流语义：进程内滑动 60s 窗口，仅作用于 `type === 'free'` 的通道；被限流拒绝的请求**不计费、不转发**。
+主转发与故障 fallback 走 free 通道前都必须先过限流器；fallback 被限流时按原失败通道报 500。
+
+配额告警语义：请求成功后累计用量，若本次增量使 `token_used / quota_limit` **跨越** `QUOTA_WARN_PERCENT`，
+向 `alerts` 写入一条 `warning`（消息含项目名与百分比）；同一令牌每个阈值只告一次（以跨越瞬间判定）。
+
+## 3. 管理接口 `/api/admin`（鉴权见 §6：设置 `ADMIN_TOKEN` 后必须带 `x-admin-token`）
 
 | 方法+路径 | 入参 | 出参 |
 |---|---|---|
@@ -80,11 +90,11 @@ toJSON()                // { id, type, name, enabled, config, healthStatus, ... 
 熔断语义：连续失败 ≥ 3 次 → 通道临时移出候选池，冷却 60s 后自动重试恢复；
 路由优先级：请求显式指定 > Jev（开启且置信度达标）> 基础规则（测试任务→free，正式业务→sponsored/aiping）。
 
-## 6. Admin 鉴权（Phase 2 引入，前后端先按此契约开发）
+## 6. Admin 鉴权（已实现：`src/middleware/adminAuth.js`）
 
-- 环境变量 `ADMIN_TOKEN`；未设置时 admin 接口保持开放（兼容现有 Demo）
-- 设置后：所有 `/api/admin/*` 与 `/api/dashboard/jev` 必须带 `x-admin-token: <ADMIN_TOKEN>`，否则 401
-- 看板前端在 401 时弹出 token 输入框并存 localStorage
+- 环境变量 `ADMIN_TOKEN`；未设置时 admin 接口保持开放（兼容现有 Demo/本机开发）
+- 设置后：所有 `/api/admin/*` 与未来的 `/api/dashboard/jev` 必须带 `x-admin-token: <ADMIN_TOKEN>`，否则 401 `{error:{type:'invalid_request_error'}}`
+- 看板前端在 401 时弹出 token 输入框并存 localStorage（组员3 按此实现）
 
 ## 7. mock channel 行为规范（`test/mocks/mock-channel.mjs`）
 

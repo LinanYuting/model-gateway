@@ -70,6 +70,24 @@ export function isQuotaExceeded(tokenRow) {
   return used >= limit;
 }
 
+export function getWarnPercent() {
+  const p = parseInt(process.env.QUOTA_WARN_PERCENT || '80', 10);
+  return Number.isFinite(p) && p > 0 && p <= 100 ? p : 80;
+}
+
+// 本次增量是否使使用率跨越告警阈值（CONTRACT §2：仅跨越瞬间告警一次）
+export function evalQuotaWarning(beforeUsed, limit, addedTokens, warnPercent = getWarnPercent()) {
+  const effectiveLimit = limit || 100000000;
+  if (!(effectiveLimit > 0) || !(addedTokens > 0)) return { shouldWarn: false, afterPercent: 0 };
+  const threshold = effectiveLimit * warnPercent / 100;
+  const before = beforeUsed || 0;
+  const after = before + addedTokens;
+  return {
+    shouldWarn: before < threshold && after >= threshold,
+    afterPercent: Math.floor((after / effectiveLimit) * 100)
+  };
+}
+
 export function deleteToken(id) {
   const db = getDb();
   const result = db.prepare('DELETE FROM tokens WHERE id = ?').run(id);

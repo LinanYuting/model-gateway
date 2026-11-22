@@ -4,8 +4,9 @@ import { getDb } from '../db/index.js';
 import { getChannel } from '../services/channelRegistry.js';
 import { routeRequest } from '../services/router.js';
 import { recordFailure, recordSuccess, isCircuitOpen } from '../services/circuitBreaker.js';
-import { isQuotaExceeded } from '../services/quota.js';
+import { evalQuotaWarning } from '../services/quota.js';
 import { incrementUsage } from '../services/quota.js';
+import { acquire } from '../services/rateLimiter.js';
 import { authMiddleware } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -37,29 +38,22 @@ router.post('/chat/completions', authMiddleware, async (req, res) => {
   const startTime = Date.now();
   const { messages, model, specifiedChannel, taskType } = req.body;
   
-  // 配额超限处理：降级到免费通道
+  // 配额硬限（CONTRACT §2）：超限直接 403，不再兜底走免费通道
   let targetChannelId = null;
   let isFallback = false;
   
   if (req.quotaExceeded) {
-    const freeChannel = getChannel('free');
-    if (freeChannel && freeChannel.isEnabled()) {
-      targetChannelId = 'free';
-      isFallback = true;
-    } else {
-      recordAlert('critical', `Quota exceeded and free channel unavailable for token ${req.tokenId}`);
-      return res.status(429).json({ 
-        error: 'Too Many Requests',
-        message: 'Quota exceeded and no fallback channel available'
-      });
-    }
-  } else {
-    targetChannelId = routeRequest({
-      specifiedChannel,
-      taskType: taskType || 'formal',
-      useJev: false
+    res.set('X-Request-Id', requestId);
+    return res.status(403).json({
+      error: { type: 'quota_exceeded', message: 'Project quota exceeded' }
     });
   }
+
+  targetChannelId = routeRequest({
+    specifiedChannel,
+    taskType: taskType || 'formal',
+    useJev: false
+  });
   
   if (!targetChannelId) {
     return res.status(503).json({ 
@@ -72,6 +66,18 @@ router.post('/chat/completions', authMiddleware, async (req, res) => {
   
   if (!channel) {
     return res.status(503).json({ error: 'Channel not found' });
+  }
+  
+  // 免费通道内部限流（CONTRACT §2）
+  if (channel.type === 'free') {
+    const rl = acquire('free');
+    if (!rl.allowed) {
+      res.set('X-Request-Id', requestId);
+      res.set('Retry-After', String(rl.retryAfterSec));
+      return res.status(429).json({
+        error: { type: 'rate_limit_error', message: `Free channel rate limited, retry after ${rl.retryAfterSec}s` }
+      });
+    }
   }
   
   try {
@@ -93,6 +99,7 @@ router.post('/chat/completions', authMiddleware, async (req, res) => {
       stats.promptTokens, stats.completionTokens
     );
     
+    maybeWarnQuota(req.token, stats.totalTokens);
     incrementUsage(req.tokenId, stats.totalTokens);
     
     res.set('X-Channel', targetChannelId);
@@ -117,7 +124,7 @@ router.post('/chat/completions', authMiddleware, async (req, res) => {
     
     if (targetChannelId !== 'free') {
       const freeChannel = getChannel('free');
-      if (freeChannel && freeChannel.isEnabled() && !isCircuitOpen('free')) {
+      if (freeChannel && freeChannel.isEnabled() && !isCircuitOpen('free') && acquire('free').allowed) {
         try {
           const fallbackResult = await freeChannel.forward({ messages, model });
           
@@ -135,6 +142,7 @@ router.post('/chat/completions', authMiddleware, async (req, res) => {
             stats.promptTokens, stats.completionTokens
           );
           
+          maybeWarnQuota(req.token, stats.totalTokens);
           incrementUsage(req.tokenId, stats.totalTokens);
           res.set('X-Channel', 'free');
           res.set('X-Fallback', 'true');
@@ -162,6 +170,14 @@ router.post('/chat/completions', authMiddleware, async (req, res) => {
 function recordAlert(level, message) {
   const db = getDb();
   db.prepare('INSERT INTO alerts (level, message) VALUES (?, ?)').run(level, message);
+}
+
+// tokenRow 必须是增量累计之前的快照行
+function maybeWarnQuota(tokenRow, addedTokens) {
+  const { shouldWarn, afterPercent } = evalQuotaWarning(tokenRow.token_used || 0, tokenRow.quota_limit, addedTokens);
+  if (shouldWarn) {
+    recordAlert('warning', `Token ${tokenRow.project_name} 用量达到 ${afterPercent}%（阈值 ${process.env.QUOTA_WARN_PERCENT || 80}%）`);
+  }
 }
 
 export default router;
