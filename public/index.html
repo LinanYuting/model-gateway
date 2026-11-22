@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>轻量化模型调度网关 - 监控看板</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <style>
+    body {
+      background: linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 25%, #f8fafc 50%, #f1f5f9 75%, #e2e8f0 100%);
+      min-height: 100vh;
+    }
+    .glass-card {
+      background: rgba(255, 255, 255, 0.45);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      border-radius: 2rem;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    }
+    .glass-card:hover {
+      background: rgba(255, 255, 255, 0.55);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    }
+    .glow-dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
+    .animate-slide-down { animation: slideDown 0.18s ease-out; }
+    @keyframes slideDown { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .blur-orb { filter: blur(60px); opacity: 0.4; }
+    .glass-input {
+      background: rgba(255,255,255,0.6);
+      border: 1px solid rgba(255,255,255,0.8);
+      border-radius: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8rem;
+      outline: none;
+      width: 100%;
+    }
+    .glass-input:focus { border-color: rgba(59,130,246,0.5); box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
+    .glass-btn {
+      background: rgba(59,130,246,0.15);
+      border: 1px solid rgba(59,130,246,0.3);
+      border-radius: 0.75rem;
+      padding: 0.4rem 0.9rem;
+      font-size: 0.75rem;
+      color: #2563eb;
+      cursor: pointer;
+    }
+    .glass-btn:hover { background: rgba(59,130,246,0.25); }
+    .glass-btn-primary {
+      background: rgba(37,99,235,0.85);
+      border: 1px solid rgba(37,99,235,0.3);
+      color: white;
+    }
+    .glass-btn-primary:hover { background: rgba(37,99,235,1); }
+    .glass-btn-danger {
+      background: rgba(239,68,68,0.15);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #dc2626;
+    }
+    .glass-btn-danger:hover { background: rgba(239,68,68,0.25); }
+    .toggle-switch {
+      position: relative; width: 34px; height: 20px; border-radius: 10px;
+      background: #cbd5e1; transition: background 0.2s;
+    }
+    .toggle-switch.active { background: #3b82f6; }
+    .toggle-knob {
+      position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+      border-radius: 50%; background: white; transition: transform 0.2s;
+    }
+    .toggle-switch.active .toggle-knob { transform: translateX(14px); }
+    .circuit-open { color: #dc2626; animation: pulse 1.5s infinite; }
+    .circuit-closed { color: #10b981; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    html { scrollbar-width: thin; scrollbar-color: rgba(148,163,184,0.5) transparent; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.5); border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(100,116,139,0.65); }
+    .slim-scroll { scrollbar-width: thin; scrollbar-color: rgba(148,163,184,0.45) transparent; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+    const API_BASE = window.location.origin;
+
+    function GlassCard({ children, className = '', style = {} }) {
+      return (
+        <div className={`glass-card p-6 transition-all duration-300 ${className}`} style={style}>
+          {children}
+        </div>
+      );
+    }
+
+    function StatusDot({ status }) {
+      const colorMap = {
+        healthy: 'text-emerald-500',
+        unhealthy: 'text-red-500',
+        unconfigured: 'text-gray-400',
+        unknown: 'text-yellow-500'
+      };
+      return <span className={`glow-dot inline-block ${colorMap[status] || 'text-gray-400'}`} style={{ color: 'currentColor' }}></span>;
+    }
+
+    // 复制提示
+    function CopyButton({ text }) {
+      const [copied, setCopied] = useState(false);
+      const handleCopy = async () => {
+        await navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      };
+      return (
+        <button className="glass-btn text-xs px-2 py-1" onClick={handleCopy} title="复制">
+          {copied ? '已复制' : '复制'}
+        </button>
+      );
+    }
+
+    // 通道快速开关（启用/禁用）
+    function ChannelToggle({ channel, onChange }) {
+      return (
+        <div className="flex items-center gap-2">
+          <label className="text-[10px] text-gray-500 uppercase tracking-tighter">{channel.enabled ? '启用中' : '已禁用'}</label>
+          <button className={`toggle-switch ${channel.enabled ? 'active' : ''}`} role="switch" aria-checked={channel.enabled} onClick={() => onChange(!channel.enabled)}>
+            <div className="toggle-knob"></div>
+          </button>
+        </div>
+      );
+    }
+
+    // 熔断器状态徽章（带倒计时）
+    function CircuitBreakerBadge({ channelId }) {
+      const [status, setStatus] = useState(null);
+
+      const fetchStatus = useCallback(async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/admin/circuit-breaker/${channelId}`);
+          const data = await res.json();
+          setStatus(data);
+        } catch (_) {}
+      }, [channelId]);
+
+      useEffect(() => {
+        fetchStatus();
+        const t = setInterval(fetchStatus, 5000);
+        return () => clearInterval(t);
+      }, [fetchStatus]);
+
+      if (!status) return null;
+
+      const isOpen = status.isOpen || false;
+      const remaining = Math.max(0, Math.ceil((new Date(status.openUntil || 0) - new Date()) / 1000));
+
+      return (
+        <div className="flex items-center gap-1 mt-2">
+          <span className={`glow-dot ${isOpen ? 'circuit-open' : 'circuit-closed'}`}></span>
+          <span className={`text-[10px] font-medium ${isOpen ? 'text-red-600' : 'text-emerald-600'}`}>
+            {isOpen ? `熔断中 ${remaining}s` : '正常'}
+          </span>
+        </div>
+      );
+    }
+
+    // 通道配置面板（支持每个 Key 独立 endpoint/model）
+    function ChannelConfigPanel({ channel, onClose, onSave }) {
+      const [keys, setKeys] = useState([]);
+      const [enabled, setEnabled] = useState(channel.enabled);
+      const [saving, setSaving] = useState(false);
+      const [error, setError] = useState('');
+
+      useEffect(() => {
+        const cfg = channel.config || {};
+        // 支持新格式：keys 数组，每个 {endpoint, model, apiKey}
+        // 兼容旧格式：单一 endpoint/model + apiKeys 数组
+        if (Array.isArray(cfg.keys) && cfg.keys.length > 0) {
+          setKeys(cfg.keys.map(k => ({ endpoint: k.endpoint || '', model: k.model || '', apiKey: k.apiKey || '' })));
+        } else if (Array.isArray(cfg.apiKeys) && cfg.apiKeys.length > 0) {
+          // 迁移旧格式
+          setKeys(cfg.apiKeys.map(k => ({
+            endpoint: cfg.endpoint || '',
+            model: cfg.model || '',
+            apiKey: k
+          })));
+        } else if (cfg.apiKey) {
+          setKeys([{ endpoint: cfg.endpoint || '', model: cfg.model || '', apiKey: cfg.apiKey }]);
+        } else {
+          // 默认一个空行
+          setKeys([{ endpoint: cfg.endpoint || '', model: cfg.model || '', apiKey: '' }]);
+        }
+        setEnabled(channel.enabled);
+      }, [channel]);
+
+      const addKey = () => setKeys([...keys, { endpoint: '', model: '', apiKey: '' }]);
+      const removeKey = (idx) => setKeys(keys.filter((_, i) => i !== idx));
+      const updateKey = (idx, field, val) => {
+        const next = [...keys];
+        next[idx] = { ...next[idx], [field]: val };
+        setKeys(next);
+      };
+
+      const handleSave = async () => {
+        setSaving(true); setError('');
+        try {
+          const validKeys = keys.filter(k => k.apiKey.trim());
+          const config = {
+            keys: validKeys,
+            // 兼容旧字段（取第一个 key 的值）
+            endpoint: validKeys[0]?.endpoint || '',
+            model: validKeys[0]?.model || '',
+            apiKey: validKeys[0]?.apiKey || '',
+            apiKeys: validKeys.map(k => k.apiKey)
+          };
+          const res = await fetch(`${API_BASE}/api/admin/channels/${channel.id}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config, enabled })
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.message || '保存失败');
+          }
+          onSave();
+        } catch (e) { setError(e.message); }
+        finally { setSaving(false); }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
+          <div className="glass-card w-full max-w-4xl p-6 max-h-[90vh] overflow-y-auto slim-scroll" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-gray-900 mb-4">配置 {channel.name} ({channel.type})</h3>
+            {error && <div className="mb-4 p-3 bg-red-100/50 border border-red-200/50 rounded-lg text-red-600 text-xs">{error}</div>}
+            <div className="space-y-3">
+              {keys.map((k, idx) => (
+                <div key={idx} className="border border-white/20 rounded-lg p-3 bg-white/20 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-gray-600">Key #{idx + 1}</span>
+                    {keys.length > 1 && <button className="glass-btn glass-btn-danger text-xs px-2 py-1" onClick={() => removeKey(idx)}>删除此 Key</button>}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">Endpoint</label>
+                      <input className="glass-input" value={k.endpoint} onChange={e => updateKey(idx, 'endpoint', e.target.value)} placeholder="https://api.example.com/v1/chat/completions" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">模型名称</label>
+                      <input className="glass-input" value={k.model} onChange={e => updateKey(idx, 'model', e.target.value)} placeholder="gpt-3.5-turbo" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">API Key</label>
+                      <input className="glass-input" type="password" value={k.apiKey} onChange={e => updateKey(idx, 'apiKey', e.target.value)} placeholder="sk-..." />
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <button className="glass-btn text-xs px-2 py-1" onClick={addKey}>+ 添加 Key</button>
+              <p className="text-[10px] text-gray-400">每个 Key 可独立配置 Endpoint 和模型。仅 API Key 为空的行会被忽略。</p>
+              <div className="flex items-center justify-between">
+                <label className="text-xs text-gray-600">启用此通道</label>
+                <button className={`toggle-switch ${enabled ? 'active' : ''}`} role="switch" aria-checked={enabled} onClick={() => setEnabled(!enabled)}>
+                  <div className="toggle-knob"></div>
+                </button>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button className="glass-btn" onClick={onClose}>取消</button>
+              <button className="glass-btn glass-btn-primary" onClick={handleSave} disabled={saving}>
+                {saving ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // 创建 Token 面板
+    function CreateTokenPanel({ onClose, onSave }) {
+      const [projectName, setProjectName] = useState('');
+      const [quotaLimitM, setQuotaLimitM] = useState(100); // 100 M = 100M token
+      const [saving, setSaving] = useState(false);
+      const [created, setCreated] = useState(null);
+      const [error, setError] = useState('');
+
+      const handleCreate = async () => {
+        if (!projectName.trim()) { setError('请输入项目名称'); return; }
+        setSaving(true);
+        setError('');
+        try {
+          const quotaLimit = quotaLimitM * 1000000;
+          const res = await fetch(`${API_BASE}/api/admin/tokens`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectName: projectName.trim(), quotaLimit })
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.message || '创建失败');
+          }
+          const data = await res.json();
+          setCreated(data);
+          onSave();
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setSaving(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
+          <div className="glass-card w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-gray-900 mb-4">创建新 Token</h3>
+            {created ? (
+              <div className="space-y-3">
+                <div className="p-4 bg-emerald-50/60 border border-emerald-200/50 rounded-xl">
+                  <p className="text-xs text-emerald-700 mb-1">Token 创建成功</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-mono font-bold text-gray-900 break-all flex-1">{created.token}</p>
+                    <button className="glass-btn text-xs px-2 py-1" onClick={() => navigator.clipboard.writeText(created.token)}>复制</button>
+                  </div>
+                </div>
+                <div className="text-xs text-gray-500">
+                  <p>项目: {created.projectName}</p>
+                  <p>配额上限: {(created.quotaLimit / 1000000).toFixed(2)} M Token</p>
+                </div>
+                <p className="text-xs text-amber-600 bg-amber-50/60 p-2 rounded-lg border border-amber-200/50">
+                  请立即复制保存此 Token，关闭后将无法再次查看
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {error && <div className="p-3 bg-red-100/50 border border-red-200/50 rounded-lg text-red-600 text-xs">{error}</div>}
+                <div>
+                  <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">项目名称</label>
+                  <input className="glass-input" value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="例如：内部测试项目" />
+                </div>
+                <div>
+                  <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-1">配额上限（M Token，百万）</label>
+                  <input className="glass-input" type="number" step="1" min="1" value={quotaLimitM} onChange={e => setQuotaLimitM(parseInt(e.target.value) || 1)} placeholder="100" title="单位：M (百万 token)，100 = 1亿 token" />
+                </div>
+              </div>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              {created ? (
+                <button className="glass-btn glass-btn-primary" onClick={onClose}>关闭</button>
+              ) : (
+                <>
+                  <button className="glass-btn" onClick={onClose}>取消</button>
+                  <button className="glass-btn glass-btn-primary" onClick={handleCreate} disabled={saving}>
+                    {saving ? '创建中...' : '创建'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Token 行：显示、刷新、改配额、删除
+    function TokenRow({ token, onRefresh, selected, onSelectChange }) {
+      const [quotaLimit, setQuotaLimit] = useState(token.quotaLimit || token.quota_limit || 0);
+      const [saving, setSaving] = useState(false);
+      const [msg, setMsg] = useState('');
+      const [deleting, setDeleting] = useState(false);
+
+      const handleRefresh = async () => {
+        setSaving(true); setMsg('');
+        try {
+          const res = await fetch(`${API_BASE}/api/admin/tokens/${token.id}/refresh`, { method: 'POST' });
+          if (!res.ok) throw new Error('刷新失败');
+          const data = await res.json();
+          setMsg('Token 已刷新');
+          onRefresh();
+        } catch (e) { setMsg(e.message); }
+        finally { setSaving(false); setTimeout(() => setMsg(''), 3000); }
+      };
+
+      const handleQuotaUpdate = async () => {
+        setSaving(true); setMsg('');
+        try {
+          const res = await fetch(`${API_BASE}/api/admin/tokens/${token.id}/quota`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ quotaLimit })
+          });
+          if (!res.ok) throw new Error('更新配额失败');
+          setMsg('配额已更新');
+          onRefresh();
+        } catch (e) { setMsg(e.message); }
+        finally { setSaving(false); setTimeout(() => setMsg(''), 3000); }
+      };
+
+      const handleDelete = async () => {
+        if (!window.confirm('确定要删除此 Token 吗？此操作不可恢复。')) return;
+        setDeleting(true);
+        try {
+          const res = await fetch(`${API_BASE}/api/admin/tokens/${token.id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('删除失败');
+          onRefresh();
+        } catch (e) {
+          setMsg(e.message);
+          setDeleting(false);
+          setTimeout(() => setMsg(''), 3000);
+        }
+      };
+
+      // 转换为 M (百万 token) 显示
+      const usedTokens = token.tokenUsed || token.token_used || 0;
+      const limitTokens = token.quotaLimit || token.quota_limit || 100000000;
+      const usedM = (usedTokens / 1000000).toFixed(2);
+      const limitM = (limitTokens / 1000000).toFixed(2);
+      const quotaLimitM = (quotaLimit / 1000000).toFixed(2);
+
+      return (
+        <div className="glass-card p-4 mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3">
+              <input type="checkbox" className="token-checkbox accent-blue-600 cursor-pointer" checked={selected} onChange={e => onSelectChange(token.id, e.target.checked)} />
+              <div>
+                <p className="text-sm font-semibold text-gray-900">{token.projectName || token.project_name || 'Unknown'}</p>
+                <p className="text-[10px] font-mono text-gray-500 break-all">{token.token}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <CopyButton text={token.token} className="text-xs px-2 py-1" />
+              <button className="glass-btn glass-btn-danger text-xs px-2 py-1" onClick={handleDelete} disabled={deleting || saving}>
+                {deleting ? '删除中...' : '删除'}
+              </button>
+            </div>
+          </div>
+          <div className="w-full bg-gray-200/50 rounded-full h-2 mb-2 overflow-hidden">
+            <div className={`bg-blue-600 h-full ${usedTokens >= limitTokens ? 'bg-red-500' : ''}`} style={{ width: limitTokens ? Math.min(100, (usedTokens / limitTokens) * 100) : 0 }}></div>
+          </div>
+          <div className="flex items-center justify-between text-xs mb-1">
+            <span className="text-gray-500">已用 Token / 上限 (M)</span>
+            <span className={`font-medium ${usedTokens >= limitTokens ? 'text-red-600' : 'text-gray-700'}`}>{usedM} / {limitM}</span>
+          </div>
+          <div className="flex gap-2 items-center">
+            <input className="glass-input" type="number" step="1" min="1" value={quotaLimitM} onChange={e => setQuotaLimit(parseInt(e.target.value) * 1000000 || 1000000)} placeholder="M Token" title="单位：M (百万 token)" />
+            <button className="glass-btn text-xs px-2 py-1 whitespace-nowrap" onClick={handleQuotaUpdate} disabled={saving}>改配额</button>
+            <button className="glass-btn text-xs px-2 py-1 whitespace-nowrap" onClick={handleRefresh} disabled={saving}>刷新Token</button>
+          </div>
+          {msg && <p className={`text-[10px] mt-1 ${msg.includes('失败') ? 'text-red-600' : 'text-emerald-600'}`}>{msg}</p>}
+        </div>
+      );
+    }
+
+    // 主看板组件
+    function Dashboard() {
+      const [summary, setSummary] = useState({ totalRequests: 0, activeChannels: 0, totalChannels: 0, unresolvedAlerts: 0 });
+      const [channels, setChannels] = useState([]);
+      const [logs, setLogs] = useState([]);
+      const [alerts, setAlerts] = useState([]);
+      const [tokens, setTokens] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [useMock, setUseMock] = useState(false);
+      const [activeModal, setActiveModal] = useState(null);
+      const [editingChannel, setEditingChannel] = useState(null);
+      const [autoRefresh, setAutoRefresh] = useState(true);
+      const [expandedLogId, setExpandedLogId] = useState(null);
+      const [selectedIds, setSelectedIds] = useState(() => new Set());
+      const [batchDeleting, setBatchDeleting] = useState(false);
+      const intervalRef = useRef(null);
+
+      const fetchData = useCallback(async () => {
+        try {
+          const endpoint = useMock ? '/api/dashboard/mock' : '/api/dashboard';
+          const [summaryRes, channelsRes, logsRes, alertsRes] = await Promise.all([
+            fetch(`${API_BASE}${endpoint}/summary`).then(r => r.json()),
+            fetch(`${API_BASE}${endpoint}/channels`).then(r => r.json()),
+            fetch(`${API_BASE}${endpoint}/logs?limit=10`).then(r => r.json()),
+            fetch(`${API_BASE}${endpoint}/alerts?limit=10`).then(r => r.json())
+          ]);
+          setSummary(summaryRes);
+          setChannels(channelsRes);
+          setLogs(logsRes);
+          setAlerts(alertsRes);
+
+          try {
+            const tokensRes = await fetch(`${API_BASE}/api/admin/tokens`).then(r => r.json());
+            setTokens(tokensRes);
+            const ids = new Set((Array.isArray(tokensRes) ? tokensRes : []).map(t => t.id));
+            setSelectedIds(prev => {
+              const next = new Set(Array.from(prev).filter(id => ids.has(id)));
+              return next.size === prev.size ? prev : next;
+            });
+          } catch (_) {}
+
+          setLoading(false);
+        } catch (error) {
+          console.error('Fetch error:', error);
+          if (!useMock) setUseMock(true);
+        }
+      }, [useMock]);
+
+      useEffect(() => {
+        fetchData();
+        if (autoRefresh) {
+          intervalRef.current = setInterval(fetchData, 5000);
+        }
+        return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+      }, [fetchData, autoRefresh]);
+
+      const toggleChannelEnabled = async (channelId, newEnabled) => {
+        try {
+          const res = await fetch(`${API_BASE}/api/admin/channels/${channelId}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: newEnabled })
+          });
+          if (res.ok) fetchData();
+        } catch (_) {}
+      };
+
+      const handleChannelSave = () => { setEditingChannel(null); fetchData(); };
+      const handleTokenSave = () => { fetchData(); };
+
+      const handleTokenSelect = (id, checked) => {
+        setSelectedIds(prev => {
+          const next = new Set(prev);
+          if (checked) next.add(id); else next.delete(id);
+          return next;
+        });
+      };
+
+      const allSelected = tokens.length > 0 && selectedIds.size === tokens.length;
+      const handleSelectAll = checked => {
+        setSelectedIds(checked ? new Set(tokens.map(t => t.id)) : new Set());
+      };
+
+      const handleBatchDeleteTokens = async () => {
+        const ids = Array.from(selectedIds);
+        if (ids.length === 0) { alert('请先勾选要删除的 Token'); return; }
+        if (!window.confirm(`确定要删除选中的 ${ids.length} 个 Token 吗？此操作不可恢复。`)) return;
+        setBatchDeleting(true);
+        const failed = [];
+        for (const id of ids) {
+          try {
+            const res = await fetch(`${API_BASE}/api/admin/tokens/${id}`, { method: 'DELETE' });
+            if (!res.ok) {
+              let detail = '';
+              try { detail = (await res.json()).error || ''; } catch (_) {}
+              failed.push(`${id.slice(0, 8)}… (${res.status}${detail ? ' ' + detail : ''})`);
+            }
+          } catch (e) {
+            failed.push(`${id.slice(0, 8)}… (${e.message})`);
+          }
+        }
+        setBatchDeleting(false);
+        setSelectedIds(new Set());
+        fetchData();
+        if (failed.length > 0) {
+          alert(`删除完成，但有 ${failed.length} 个失败：\n${failed.slice(0, 5).join('\n')}${failed.length > 5 ? '\n…' : ''}`);
+        }
+      };
+
+      if (loading) {
+        return (
+          <div className="flex items-center justify-center min-h-screen">
+            <div className="glass-card p-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-3"></div>
+              <p className="text-gray-500 text-sm uppercase tracking-widest">加载中...</p>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="relative min-h-screen overflow-hidden">
+          <div className="fixed top-0 left-0 w-full h-full pointer-events-none">
+            <div className="blur-orb absolute top-[-10%] left-[-5%] w-96 h-96 bg-blue-300 rounded-full"></div>
+            <div className="blur-orb absolute bottom-[-10%] right-[-5%] w-80 h-80 bg-indigo-200 rounded-full"></div>
+            <div className="blur-orb absolute top-[40%] right-[20%] w-64 h-64 bg-cyan-200 rounded-full"></div>
+          </div>
+
+          <div className="relative z-10 max-w-7xl mx-auto px-6 py-8">
+            <div className="mb-8 flex items-end justify-between">
+              <div>
+                <h1 className="text-5xl font-black tracking-tighter text-gray-900 mb-2">
+                  轻量化模型调度网关
+                </h1>
+                <p className="text-[10px] uppercase tracking-widest text-gray-500">
+                  监控看板 · Phase 1 Demo
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer hover:text-blue-600">
+                  <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} className="accent-blue-600" />
+                  自动刷新
+                </label>
+                <button className="glass-btn text-xs px-2 py-1" onClick={fetchData}>手动刷新</button>
+                <button className="glass-btn" onClick={() => setActiveModal('createToken')}>+ 创建 Token</button>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <GlassCard className="relative overflow-hidden">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] uppercase tracking-widest text-gray-500 mb-2">总请求量</p>
+                    <p className="text-6xl font-black tracking-tighter text-gray-900">
+                      {summary.totalRequests.toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase tracking-widest text-gray-500 mb-2">活跃通道</p>
+                    <p className="text-4xl font-black tracking-tighter text-blue-600">
+                      {summary.activeChannels} / {summary.totalChannels}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-4 flex items-center gap-2">
+                  <StatusDot status="healthy" />
+                  <span className="text-xs text-gray-500">系统运行中</span>
+                  <span className="ml-auto text-[10px] uppercase tracking-widest text-gray-400">
+                    {summary.unresolvedAlerts} 条未解决告警
+                  </span>
+                </div>
+              </GlassCard>
+            </div>
+
+            {/* 通道卡片（带快速开关 + 熔断状态） */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              {channels.map(channel => (
+                <GlassCard key={channel.id} className="relative">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold text-gray-800">{channel.name}</h3>
+                    <StatusDot status={channel.healthStatus} />
+                  </div>
+                  <div className="space-y-2 mb-3">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-gray-500">状态</span>
+                      <span className={`font-medium ${channel.enabled ? 'text-emerald-600' : 'text-gray-400'}`}>
+                        {channel.enabled ? '已启用' : '已禁用'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-gray-500">健康</span>
+                      <span className="font-medium text-gray-700">{channel.healthStatus}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-gray-500">类型</span>
+                      <span className="font-medium text-gray-700">{channel.type}</span>
+                    </div>
+                    {channel.config?.endpoint && (
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-500">地址</span>
+                        <span className="font-medium text-gray-700 truncate max-w-[120px]" title={channel.config.endpoint}>
+                          {channel.config.endpoint}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex gap-1 mb-3">
+                    <ChannelToggle channel={channel} onChange={(v) => toggleChannelEnabled(channel.id, v)} />
+                    <button className="flex-1 glass-btn text-xs px-3 py-1.5" onClick={() => { setEditingChannel(channel); }}>配置</button>
+                  </div>
+                  <CircuitBreakerBadge channelId={channel.id} />
+                </GlassCard>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+              {/* Token 管理 */}
+              <GlassCard>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    <h3 className="text-sm font-semibold text-gray-800">Token 管理</h3>
+                    {tokens.length > 0 && (
+                      <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer hover:text-blue-600">
+                        <input type="checkbox" className="accent-blue-600 cursor-pointer" checked={allSelected} onChange={e => handleSelectAll(e.target.checked)} />
+                        全选
+                      </label>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button className="glass-btn text-xs px-2 py-1" onClick={() => setActiveModal('createToken')}>+ 新建</button>
+                    <button className="glass-btn glass-btn-danger text-xs px-2 py-1" onClick={handleBatchDeleteTokens} disabled={batchDeleting || selectedIds.size === 0}>
+                      {batchDeleting ? '删除中...' : `批量删除${selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}`}
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-2 max-h-64 overflow-y-auto slim-scroll pr-1">
+                  {tokens.length === 0 ? (
+                    <p className="text-xs text-gray-400 text-center py-4">暂无 Token</p>
+                  ) : (
+                    tokens.map(token => (
+                      <TokenRow key={token.id} token={token} onRefresh={fetchData} selected={selectedIds.has(token.id)} onSelectChange={handleTokenSelect} />
+                    ))
+                  )}
+                </div>
+              </GlassCard>
+
+              // 最近调用
+              <GlassCard className="mb-6">
+                <h3 className="text-sm font-semibold text-gray-800 mb-4">最近调用</h3>
+                <div className="space-y-2 max-h-96 overflow-y-auto slim-scroll pr-1 w-full">
+                  {logs.length === 0 ? (
+                    <p className="text-xs text-gray-400 text-center py-4">暂无调用记录</p>
+                  ) : (
+                    logs.map(log => (
+                      <div key={log.id} className="border border-white/20 rounded-lg overflow-hidden bg-white/30">
+                        {/* 摘要行 - 单行不换行 */}
+                        <div 
+                          className="flex items-center justify-between text-xs py-2 px-3 border-b border-white/10 last:border-0 bg-white/5 cursor-pointer hover:bg-white/10 transition-colors whitespace-nowrap"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedLogId(expandedLogId === log.id ? null : log.id);
+                          }}
+                        >
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <span className="font-medium text-gray-700 truncate">{log.project_name || 'Unknown'}</span>
+                            <span className="text-[10px] text-gray-400 ml-1">→</span>
+                            <span className="text-[10px] text-gray-500 truncate max-w-xs">{log.channel_name || log.channel_id}</span>
+                          </div>
+                          <div className="flex items-center gap-2 ml-2 flex-shrink-0">
+                            <span className={`font-medium ${log.status_code === 200 ? 'text-emerald-600' : 'text-red-500'} whitespace-nowrap`}>
+                              {log.status_code}
+                            </span>
+                            <span className="text-gray-400 whitespace-nowrap">{log.latency_ms}ms</span>
+                            <span className="text-[10px] text-gray-400 ml-1">{expandedLogId === log.id ? '▲' : '▼'}</span>
+                          </div>
+                        </div>
+                        {/* 详细展开 */}
+                        {expandedLogId === log.id && (
+                          <div className="bg-white/10 p-3 border-b border-white/10 last:border-0 animate-slide-down">
+                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 text-[10px]">
+                              <div className="flex flex-col gap-1">
+                                <span className="text-gray-400">轮次</span>
+                                <span className="text-gray-700 font-mono">{log.rounds || 1} 轮</span>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <span className="text-gray-400">速度</span>
+                                <span className="text-gray-700 font-mono">{log.tokens_per_sec || 0} tok/s</span>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <span className="text-gray-400">缓存</span>
+                                <span className={`text-gray-700 font-mono ${log.cache_hit ? 'text-emerald-600' : 'text-red-400'}`}>
+                                  {log.cache_hit ? '是' : '否'}
+                                </span>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <span className="text-gray-400">Prompt</span>
+                                <span className="text-gray-700 font-mono">{log.prompt_tokens || 0} tok</span>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <span className="text-gray-400">Completion</span>
+                                <span className="text-gray-700 font-mono">{log.completion_tokens || 0} tok</span>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <span className="text-gray-400">总 Token</span>
+                                <span className="text-gray-700 font-mono">{log.token_used || 0} tok</span>
+                              </div>
+                              {log.error_message && (
+                                <div className="col-span-2 lg:col-span-6 flex flex-col gap-1">
+                                  <span className="text-gray-400">错误</span>
+                                  <span className="text-red-500 text-[10px] truncate">{log.error_message}</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </GlassCard>
+            </div>
+
+            {/* 告警 */}
+            <GlassCard className="mb-6">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-gray-800">告警记录</h3>
+              </div>
+              <div className="space-y-2 max-h-40 overflow-y-auto slim-scroll pr-1">
+                {alerts.length === 0 ? (
+                  <p className="text-xs text-gray-400 text-center py-4">暂无告警</p>
+                ) : (
+                  alerts.map(alert => (
+                    <div key={alert.id} className="flex items-start gap-2 text-xs py-2 border-b border-white/30 last:border-0">
+                      <span className={`glow-dot mt-1 ${alert.level === 'critical' ? 'text-red-500' : alert.level === 'warning' ? 'text-yellow-500' : 'text-blue-500'}`}></span>
+                      <div className="flex-1">
+                        <p className="text-gray-700">{alert.message}</p>
+                        <p className="text-gray-400 mt-1">{alert.created_at}</p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </GlassCard>
+
+            <div className="text-center">
+              <p className="text-[10px] uppercase tracking-widest text-gray-400">
+                轻量化模型调度网关 · Phase 1 Demo · 内网访问
+              </p>
+            </div>
+          </div>
+
+          {editingChannel && (
+            <ChannelConfigPanel
+              channel={editingChannel}
+              onClose={() => setEditingChannel(null)}
+              onSave={handleChannelSave}
+            />
+          )}
+
+          {activeModal === 'createToken' && (
+            <CreateTokenPanel
+              onClose={() => setActiveModal(null)}
+              onSave={handleTokenSave}
+            />
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<Dashboard />);
+  </script>
+</body>
+</html>

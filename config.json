@@ -1,0 +1,48 @@
+{
+  "channels": {
+    "free": {
+      "enabled": true,
+      "name": "免费公共通道",
+      "type": "free",
+      "config": {
+        "endpoint": "http://localhost:18900/v1/chat/completions",
+        "model": "gpt-3.5-turbo",
+        "apiKey": "",
+        "apiKeys": []
+      }
+    },
+    "sponsored": {
+      "enabled": false,
+      "name": "赞助密钥通道",
+      "type": "sponsored",
+      "config": {
+        "endpoint": "",
+        "model": "",
+        "apiKey": "",
+        "apiKeys": []
+      }
+    },
+    "aiping": {
+      "enabled": false,
+      "name": "aiping 通道",
+      "type": "aiping",
+      "config": {
+        "endpoint": "",
+        "model": "",
+        "apiKey": "",
+        "apiKeys": []
+      }
+    }
+  },
+  "quota": {
+    "defaultLimit": 1000
+  },
+  "circuitBreaker": {
+    "threshold": 3,
+    "cooldownSec": 60
+  },
+  "healthProbe": {
+    "intervalMs": 60000
+  },
+  "useJev": false
+}
