@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      # 基线用例数：只允许上调，不允许下降。
+      # 下降通常意味着测试被删，或测试文件没被 runner 发现（见下方说明）。
+      EXPECTED_MIN_TESTS: 37
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 安装依赖（按 lock 还原）
+        run: npm ci
+
+      # 直接调用 runner 并显式给出目录，而不是 `npm test`。
+      # 原因：package.json 里的 glob `src/**/*.test.js` 由 shell 展开，
+      # Windows 上 npm 用 cmd 执行脚本，`**` 不展开，会报 Could not find。
+      # `node --test src` 两个平台行为一致，测的是同一批文件、同一个 runner。
+      - name: 跑测试并校验用例数
+        shell: bash
+        run: |
+          code=0
+          node --test src > test-output.log 2>&1 || code=$?
+          cat test-output.log
+          tests=$(grep -m1 -E '^# tests ' test-output.log | awk '{print $3}')
+          fail=$(grep -m1 -E '^# fail ' test-output.log | awk '{print $3}')
+          echo "发现用例: ${tests:-0}，失败: ${fail:-0}"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::测试进程退出码 $code"
+            exit 1
+          fi
+          if [ "${fail:-1}" -ne 0 ]; then
+            echo "::error::存在失败用例"
+            exit 1
+          fi
+          if [ "${tests:-0}" -lt "$EXPECTED_MIN_TESTS" ]; then
+            echo "::error::用例数 ${tests:-0} 少于基线 $EXPECTED_MIN_TESTS（测试被删，或 .test.js 未被发现）"
+            exit 1
+          fi
+
+      # 这一条只守「文档里写的入口还能用」，不改变上面的判定口径。
+      - name: 校验 CONTRIBUTING 记载的入口仍可用
+        if: runner.os == 'Linux'
+        run: npm test
