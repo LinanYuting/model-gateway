@@ -68,6 +68,7 @@
 | `DELETE /tokens/:id` | — | `{success:true}`；不存在 404 |
 | `DELETE /channels/:id` | — | `{success:true}`；不存在 404 |
 | `GET /circuit-breaker/:channelId` | — | `{ open, openUntil, failureCount }` |
+| `PUT /alerts/:id/resolve` | — | 将该告警 `resolved` 置 1，返回更新后的 `Alert`；不存在 404 `{error}`；已处理的再次调用幂等返回 200（Phase 2 新增，供看板“已处理”操作，组员3） |
 
 ## 4. 看板数据接口 `/api/dashboard`
 
