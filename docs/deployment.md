@@ -80,37 +80,60 @@ npm -v    # 10.8.2
 
 ## 2. 获取代码
 
-### 2.1 标准流程（fork → clone）
+### 2.1 标准流程（fork → clone，SSH 走 443）
+
+**优先用 SSH，不要用 HTTPS。** 本机实测 HTTPS 克隆会被代理掐断（详见 §8），SSH 稳定可用。
+
+先配好 SSH 走 443（一次性，只需做一遍）：
+
+```bash
+# 写入 ~/.ssh/config（Windows 下即 C:\Users\<你>\.ssh\config）
+cat > ~/.ssh/config <<'EOF'
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+EOF
+
+# 验证（应输出 Hi <你的用户名>! You've successfully authenticated...）
+ssh -T git@github.com
+```
+
+> 如果提示 `Permission denied (publickey)`，说明本机还没有 SSH key：`ssh-keygen -t ed25519 -C "<你的邮箱>"`，然后把 `~/.ssh/id_ed25519.pub` 内容贴到 GitHub → Settings → SSH and GPG keys。
+> 配置了这条之后，`git@github.com:xxx` 会自动走 `ssh.github.com:443`，命令行里不用再写端口。
+
+然后：
 
 ```bash
 # 先在自己 GitHub 账号下 fork：打开 github.com/LinanYuting/model-gateway 点 Fork
-git clone https://github.com/<你的用户名>/model-gateway.git
+git clone git@github.com:<你的用户名>/model-gateway.git
 cd model-gateway
 
 # 把上游加为第二远程，方便日后同步
-git remote add upstream https://github.com/LinanYuting/model-gateway.git
+git remote add upstream git@github.com:LinanYuting/model-gateway.git
 
 # 建工作分支（命名见 CONTRIBUTING.md：feature/<名字>-<主题>）
 git checkout -b feature/<名字>-<主题>
 ```
 
-⚠️ **待验证**：需要你的 GitHub 账号，且网络能完成 `git clone`。
+✅ **实测通过**：`ssh -T git@github.com` 认证成功；`git ls-remote` 与 `git clone` 均正常，拿到完整历史（`41ece42` → `d6d69e5`）。
 
-### 2.2 兜底流程（git 被代理拦死时）
+**顺带好处**：SSH 免去了 HTTPS 首次 push 要配 Personal Access Token 的麻烦，也不用担心 token 过期。
 
-若 `git clone` 持续报 `CONNECT tunnel failed, response 502`，而 `curl` 能访问 GitHub，说明代理只放行了普通 HTTPS、拦了 git 的 smart-http POST。此时：
+### 2.2 兜底流程（SSH 也不通时）
+
+如果连 SSH 443 都连不上，说明网络限制更严。降级方案是拉 zip 快照：
 
 ```bash
 curl -L -o repo.zip https://codeload.github.com/LinanYuting/model-gateway/zip/refs/heads/main
 unzip repo.zip && mv model-gateway-main model-gateway && cd model-gateway
 git init -b main
-git remote add origin https://github.com/<你的用户名>/model-gateway.git
+git remote add origin git@github.com:<你的用户名>/model-gateway.git
 git add -A && git commit -m "chore: 导入上游 main 快照"
 git checkout -b feature/<名字>-<主题>
 ```
 
-✅ **实测通过**（本机即用此法）。
-⚠️ **代价**：本地**没有上游 git 历史**，`git log` 只有一条导入提交，PR 的 diff 基准会不对。拿到可用网络后务必重新 clone 真仓库，再把改动搬过去。
+⚠️ **代价（务必知情）**：本地**没有上游 git 历史**，`git log` 只有一条导入提交，PR 的 diff 基准是错的，评审时会看到"整个仓库都是新增"。只适合临时读代码，**不要用它提 PR**。拿到可用网络后必须重新 clone 真仓库，再把改动搬过去。
 
 ---
 
@@ -365,7 +388,7 @@ git rm --cached .env           # 已 commit，从跟踪中移除（本地文件�
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `git clone` 报 `CONNECT tunnel failed, response 502`；直连超时；`ls-remote` 偶发能通 | 代理放行普通 HTTPS，但拦截 git smart-http 的 POST | 用 §2.2 的 codeload zip 兜底；或换手机热点/开全局代理；或配 SSH key 走 22 端口 |
+| `git clone` 卡住约 21 秒后报 `curl 28 Failed to connect to github.com:443` 或 `CONNECT tunnel failed, response 502`；但 `git ls-remote` 偶尔能通 | **代理只放行读、拦截写**：`GET /info/refs` 返回 200，`POST /git-upload-pack`（真正传输 commit 数据）被重置（`schannel: recv returned error 56`）。ls-remote 只走 GET，所以"偶尔正常"，clone 必挂 | **改用 SSH 443**，见 §2.1。不要浪费时间调 `http.proxy`、`postBuffer`、`--depth`，这些都绕不开那条被掐的 POST |
 | `curl` 报 `schannel: CRYPT_E_REVOCATION_OFFLINE` | Windows 证书吊销列表（CRL）服务器连不上，本地缓存过期 | 临时加 `--ssl-no-revoke`；根治需能访问 CRL 分发点 |
 | `npm install` 卡在 `better-sqlite3` 后报 `find VS ... Could not find any Visual Studio` | 预编译包从 GitHub Releases 拉取失败，回落源码编译 | 见 §3.1，用 npmmirror 的预编译包 |
 | `npm install` 整体极慢/超时 | 默认 registry 在境外 | `npm install --registry=https://registry.npmmirror.com`，或写进项目外全局 `.npmrc` |
@@ -404,6 +427,7 @@ registry=https://registry.npmmirror.com
 | 执行日期 | 2026-11-23 |
 | 系统 | Windows 11（10.0.26300），非管理员账户 |
 | Node / npm | v20.20.2 / 10.8.2（便携版，路径 `E:\启航社\免费算力平台项目\.tools\node-v20.20.2-win-x64`） |
+| 取码 | HTTPS 克隆被代理掐断 POST；改用 SSH 443 成功，历史 `41ece42` → `d6d69e5` |
 | 依赖安装 | `npm install --ignore-scripts` + 镜像预编译 `better-sqlite3`，126 包 |
 | 基线测试 | 37 / 37 通过（Git Bash 执行 `node --test`） |
 | 网关启动 | 3004 端口正常，`/health` 与 `/api/dashboard/summary` 均返回 200 |
