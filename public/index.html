@@ -368,7 +368,9 @@
     body ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text-3) 45%, transparent); }
 
     /* 主题切换按钮 */
-    body .theme-btn { min-width: 64px; justify-content: center; }
+    /* 主题按钮固定宽度：切换“跟随系统/浅色/深色”时顶栏不跳动；手机上只显示图标 */
+    body .theme-btn { justify-content: center; }
+    @media (min-width: 640px) { body .theme-btn { min-width: 7.4em; } }
 
     /* 手机端：模糊半径减小、色块动画关闭，省电也更流畅 */
     @media (max-width: 640px) {
@@ -541,7 +543,7 @@
       const next = { auto: 'light', light: 'dark', dark: 'auto' }[mode];
       return (
         <button className="glass-btn btn-icon theme-btn text-xs px-2 py-1" onClick={() => setMode(next)} title={`外观：${THEME_LABEL[mode]}（点击切换到${THEME_LABEL[next]}）`} aria-label={`外观：${THEME_LABEL[mode]}`}>
-          <ThemeIcon mode={mode} />{THEME_LABEL[mode]}
+          <ThemeIcon mode={mode} /><span className="hidden sm:inline">{THEME_LABEL[mode]}</span>
         </button>
       );
     }
@@ -1439,7 +1441,7 @@
           </div>
 
           <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
-            <div className="app-header mb-6 sm:mb-8 flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+            <div className="app-header mb-6 sm:mb-8 flex flex-col xl:flex-row xl:items-end xl:justify-between gap-4">
               <div>
                 <h1 className="app-title text-3xl sm:text-5xl font-black tracking-tighter text-gray-900 mb-2">
                   轻量化模型调度网关
@@ -1448,15 +1450,15 @@
                   多通道监控看板
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-                <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer hover:text-blue-600">
+              <div className="app-toolbar flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3">
+                <label className="flex items-center gap-1 whitespace-nowrap text-[10px] text-gray-500 cursor-pointer hover:text-blue-600">
                   <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} className="accent-blue-600" />
                   自动刷新
                 </label>
                 <button className="glass-btn text-xs px-2 py-1" onClick={fetchData}>手动刷新</button>
                 <ThemeToggle />
                 <AdminTokenButton onChanged={fetchData} />
-                <button className="glass-btn" onClick={() => setActiveModal('createToken')}>+ 创建 Token</button>
+                <button className="glass-btn text-xs px-3 py-1 w-full sm:w-auto" onClick={() => setActiveModal('createToken')}>+ 创建 Token</button>
               </div>
             </div>
 
