@@ -1,0 +1,37 @@
+name: contract-anchor
+
+# 只做提示，不阻断合并：契约已冻结，是否变更由组长判定。
+# 本任务不写入任何文件，也不回写 main。
+
+on:
+  pull_request:
+    paths:
+      - 'CONTRACT.md'
+  push:
+    branches: [main]
+    paths:
+      - 'CONTRACT.md'
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: 契约变更提示
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 输出 CONTRACT.md 内容指纹
+        run: |
+          blob=$(git hash-object CONTRACT.md)
+          echo "### CONTRACT.md 内容指纹" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 项 | 值 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| blob hash（内容指纹） | \`$blob\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 触发提交 | \`${GITHUB_SHA:0:7}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "blob hash 只随契约文本变化，不受 rebase、merge 影响；" >> "$GITHUB_STEP_SUMMARY"
+          echo "接口文档应引用它，而不是手抄 commit 号。" >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning file=CONTRACT.md::CONTRACT.md 已变更，内容指纹 ${blob:0:12}。请确认：①变更已获组长同意 ②引用契约条款的文档已同步。本任务仅提示，不阻断合并。"
