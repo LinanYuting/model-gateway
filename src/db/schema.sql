@@ -54,13 +54,15 @@ CREATE TABLE IF NOT EXISTS alerts (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- jev_decisions 表：Jev 语义路由决策记录（Phase 1 空壳，仅建表）
+-- jev_decisions 表：Jev 语义路由决策记录（任务 1.4 起写入真实决策，Phase 1 仅建表）
+-- 存量库（本机已有的 data/gateway.db）不会被 IF NOT EXISTS 重建，枚举约束由代码侧校验兜底；
+-- 新建库按契约 §1 在数据库层直接约束。
 CREATE TABLE IF NOT EXISTS jev_decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   request_id TEXT NOT NULL,
   input_summary TEXT,
   confidence REAL,
-  decision TEXT,
+  decision TEXT CHECK (decision IN ('free', 'sponsored', 'aiping', 'rule-default')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -70,3 +72,5 @@ CREATE INDEX IF NOT EXISTS idx_call_logs_channel ON call_logs(channel_id);
 CREATE INDEX IF NOT EXISTS idx_call_logs_created ON call_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_resolved ON alerts(resolved);
 CREATE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);
+-- Jev 决策记录按 request_id 关联 call_logs / 响应头 X-Request-Id
+CREATE INDEX IF NOT EXISTS idx_jev_decisions_request ON jev_decisions(request_id);

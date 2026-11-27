@@ -2,7 +2,7 @@ import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/index.js';
 import { getChannel } from '../services/channelRegistry.js';
-import { routeRequest } from '../services/router.js';
+import { routeRequestWithJev } from '../services/router.js';
 import { recordFailure, recordSuccess, isCircuitOpen } from '../services/circuitBreaker.js';
 import { evalQuotaWarning } from '../services/quota.js';
 import { incrementUsage } from '../services/quota.js';
@@ -49,11 +49,15 @@ router.post('/chat/completions', authMiddleware, async (req, res) => {
     });
   }
 
-  targetChannelId = routeRequest({
+  // 路由：显式指定 > Jev（USE_JEV 开启且置信度达标）> 基础规则（契约 §5）
+  // requestId 同时写进 call_logs 与 jev_decisions，并回填响应头 X-Request-Id，三者可互查
+  const routed = await routeRequestWithJev({
+    requestId,
+    requestContent: { messages, model, taskType: taskType || 'formal' },
     specifiedChannel,
-    taskType: taskType || 'formal',
-    useJev: false
+    taskType: taskType || 'formal'
   });
+  targetChannelId = routed.channelId;
   
   if (!targetChannelId) {
     return res.status(503).json({ 

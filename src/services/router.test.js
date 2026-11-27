@@ -50,8 +50,8 @@ describe('Router', () => {
     assert.strictEqual(channelId, 'aiping');
   });
 
-  test('Jev 空壳返回 null', () => {
-    const result = JevRoute('test input');
+  test('未注入决策器时 JevRoute 返回 null（本期默认状态）', async () => {
+    const result = await JevRoute('test input');
     assert.strictEqual(result, null);
   });
 
