@@ -55,6 +55,19 @@
 配额告警语义：请求成功后累计用量，若本次增量使 `token_used / quota_limit` **跨越** `QUOTA_WARN_PERCENT`，
 向 `alerts` 写入一条 `warning`（消息含项目名与百分比）；同一令牌每个阈值只告一次（以跨越瞬间判定）。
 
+### 流式响应（请求体 `stream: true`，Phase 2 新增 / 任务 1.1b）
+
+请求体带 `stream: true` 时，响应改为 `Content-Type: text/event-stream; charset=utf-8`，**上游分块逐块透传**，不收齐整包再发。
+
+- 响应头：`X-Channel`、`X-Request-Id` 照旧；fallback 时追加 `X-Fallback: true`。
+  `X-Total-Tokens` 等用量头**不保证存在**（用量要到流末尾才知道），用量照常写入 `call_logs`。
+- 首字节发出前失败（上游连不上、所有 key 均 429/5xx、首包前中断）：仍按下表回 500 JSON，并可照旧兜底到 free 通道。
+- 首字节发出后失败（上游中途断流）：HTTP 状态仍是 200，服务端补一个
+  `data: {"error":{"type":"upstream_stream_error","message":"..."}}` 事件，再补 `data: [DONE]` 后关闭连接；
+  `call_logs.status_code` 记 500。
+- 客户端中途断开：立刻停止向上游读取并销毁上游连接，`call_logs.status_code` 记 **499**。
+- 通道未实现流式（当前 free / aiping）：整包转发后降级为"单块 SSE"——1 个 `data: <完整响应 JSON>` 事件 + `data: [DONE]`，协议不变，前端无需分支。
+
 ## 3. 管理接口 `/api/admin`（鉴权见 §6：设置 `ADMIN_TOKEN` 后必须带 `x-admin-token`）
 
 | 方法+路径 | 入参 | 出参 |
@@ -87,6 +100,15 @@ async forward(payload) -> { success, data, latency, channel }  // 失败 throw E
 async healthCheck()     -> boolean                              // 必须带 Authorization（若配置了 key）
 toJSON()                // { id, type, name, enabled, config, healthStatus, ... }
 ```
+
+可选方法（Phase 2 起由 sponsored 实现，free / aiping 暂未实现）：
+
+```js
+async forwardStream(payload) -> { success, stream, latency, channel }  // stream 为 Node Readable，失败 throw Error
+```
+
+`forwardStream` 负责向上游发起 `stream: true` 请求（带 `Accept: text/event-stream`）并返回上游可读流，
+路由层只做原样透传、不做整包缓冲。未实现该方法的通道承接流式请求时，由路由层降级为单块 SSE（见 §2）。
 
 熔断语义：连续失败 ≥ 3 次 → 通道临时移出候选池，冷却 60s 后自动重试恢复；
 路由优先级：请求显式指定 > Jev（开启且置信度达标）> 基础规则（测试任务→free，正式业务→sponsored/aiping）。
