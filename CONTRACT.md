@@ -19,7 +19,11 @@
 ## 1. 数据表（`src/db/schema.sql` 为准，本节为摘要）
 
 - `channels`：id 固定 `free` / `sponsored` / `aiping`；`config_json` 结构统一为
-  `{ endpoint, model, apiKey, apiKeys: string[] }`（aiping 端点暂留空，插件接口先行）
+  `{ endpoint, model, apiKey, apiKeys: string[] }`（aiping 真实端点暂缓，先按插件接口对接 mock）
+  - `endpoint` 允许两种写法：base 地址（如 `https://aiping.cn/api/v1`）或完整地址（`.../chat/completions`），
+    插件自行补齐，调用方不需要关心填哪一种；健康检查走 `{base}/models`
+  - 缺 `endpoint` 或没有任何有效 key 时视为**未配置**（不是故障）：`healthCheck()` 返回 false、
+    `health_status` 保持 `unconfigured`，后台探测不写告警（任务 1.2）
 - `tokens`：`quota_limit` 单位为 LLM token 数（看板以 M 展示）；`used_count` 为请求次数
 - `call_logs`：每次调用一条，含 `is_fallback`、`cache_hit`、`tokens_per_sec` 等统计列
 - `alerts`：`level ∈ {info, warning, critical}`，`resolved` 0/1
