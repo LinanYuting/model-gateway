@@ -30,15 +30,22 @@ export async function runHealthProbe() {
     
     try {
       const healthy = await channel.healthCheck();
-      
+
+      // "没配置"和"配置了但坏了"是两回事（任务书 1.2）：
+      // 未配置的通道（比如默认关闭、还没填地址和钥匙的 aiping）健康状态要保留 unconfigured，
+      // 也不能每 60 秒刷一条「健康检查失败」告警——那不是故障，只是还没启用。
+      const healthStatus = channel.healthStatus === 'unconfigured'
+        ? 'unconfigured'
+        : (healthy ? 'healthy' : 'unhealthy');
+
       const db = getDb();
       db.prepare(`
         UPDATE channels 
         SET health_status = ?, last_probe_at = datetime('now'), updated_at = datetime('now')
         WHERE id = ?
-      `).run(healthy ? 'healthy' : 'unhealthy', ch.id);
+      `).run(healthStatus, ch.id);
       
-      if (!healthy && !isCircuitOpen(ch.id)) {
+      if (healthStatus === 'unhealthy' && !isCircuitOpen(ch.id)) {
         // 记录告警
         db.prepare('INSERT INTO alerts (level, message) VALUES (?, ?)').run(
           'warning',

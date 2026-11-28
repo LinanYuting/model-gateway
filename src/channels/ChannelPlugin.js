@@ -1,4 +1,6 @@
 // 标准通道插件接口
+import { sanitizeConfigForOutput } from '../services/secrets.js';
+
 export class ChannelPlugin {
   constructor(id, name, enabled = false, config = {}) {
     this.id = id;
@@ -26,6 +28,11 @@ export class ChannelPlugin {
     this.config = { ...this.config, ...config };
   }
 
+  // 整体替换配置（密钥解析流程用：合并语义会把上一轮的字段残留下来）
+  replaceConfig(config) {
+    this.config = { ...config };
+  }
+
   setEnabled(enabled) {
     this.enabled = enabled;
   }
@@ -40,7 +47,8 @@ export class ChannelPlugin {
       name: this.name,
       type: this.type,
       enabled: this.enabled,
-      config: this.getConfig(),
+      // 密钥一律脱敏（任务 1.3）：后台接口不能再把明文 key 吐出去
+      config: sanitizeConfigForOutput(this.config),
       healthStatus: this.healthStatus || 'unknown',
       lastProbeAt: this.lastProbeAt || null
     };
