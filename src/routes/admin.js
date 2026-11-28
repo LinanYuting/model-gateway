@@ -30,7 +30,11 @@ router.put('/channels/:id', (req, res) => {
     
     res.json(getChannel(id).toJSON());
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    // code 只在确有错误码时带上（例如没配主密钥时的 NO_MASTER_KEY），
+    // 方便前端区分"参数写错了"和"服务端没配好"。
+    const body = { error: error.message };
+    if (error.code) body.code = error.code;
+    res.status(400).json(body);
   }
 });
 

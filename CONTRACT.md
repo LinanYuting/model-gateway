@@ -15,6 +15,7 @@
 | `ADMIN_TOKEN` | 空 | **已启用**：非空时守护所有 `/api/admin/*`（见 §6）；空=admin 接口开放（仅限本机开发） |
 | `FREE_CHANNEL_RPM` | 30 | 免费通道每分钟请求上限（进程内滑动窗口，保护第三方上游，见 §2） |
 | `QUOTA_WARN_PERCENT` | 80 | 配额使用率达到该百分比时写入一条 warning 告警（仅在跨越阈值那次请求触发，不重复刷） |
+| `GATEWAY_SECRET` | 空 | 密钥落库加密用的主密钥（任务 1.3）。空时**禁止**把明文 API key 写入数据库；改用 `apiKeyRefs` 引用环境变量则不需要它 |
 
 ## 1. 数据表（`src/db/schema.sql` 为准，本节为摘要）
 
@@ -24,6 +25,15 @@
     插件自行补齐，调用方不需要关心填哪一种；健康检查走 `{base}/models`
   - 缺 `endpoint` 或没有任何有效 key 时视为**未配置**（不是故障）：`healthCheck()` 返回 false、
     `health_status` 保持 `unconfigured`，后台探测不写告警（任务 1.2）
+  - **API key 不得明文落库**（任务 1.3）：`config_json` 里的密钥只用两种形态——
+    `apiKeysEnc: string[]`（AES-256-GCM 密文，`enc:v1:<iv>:<tag>:<密文>`）或
+    `apiKeyRefs: string[]`（环境变量**名**，值不落库）；两者互斥，同时给出以 `apiKeyRefs` 为准。
+    旧 `apiKey` / `apiKeys` 明文仅为兼容存量、仍可读，但新写入一律加密；
+    迁移用 `node scripts/migrate-secrets.mjs [--dry-run]`（幂等）
+  - 写配置时的错误码：没配主密钥又提交明文 → `400` + `code: "NO_MASTER_KEY"`；
+    引用名不是合法环境变量名 → `400` + `code: "INVALID_REF_NAME"`
+  - `GET /api/admin/channels`、`GET /api/dashboard/channels` 返回的 `config` 中密钥一律脱敏
+    （形如 `sk-1…cdef`），不返回明文也不返回密文
 - `tokens`：`quota_limit` 单位为 LLM token 数（看板以 M 展示）；`used_count` 为请求次数
 - `call_logs`：每次调用一条，含 `is_fallback`、`cache_hit`、`tokens_per_sec` 等统计列
 - `alerts`：`level ∈ {info, warning, critical}`，`resolved` 0/1
