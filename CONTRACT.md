@@ -12,10 +12,13 @@
 | `OFM_ENDPOINT` | `http://localhost:18900/v1/chat/completions` | 免费通道上游（OFM 独立服务） |
 | `MOCK_PORT` | 18901 | mock channel 端口 |
 | `USE_JEV` | `false` | Jev 语义路由总开关（组员1 接入前保持 false，路由走基础规则） |
-| `ADMIN_TOKEN` | 空 | **已启用**：非空时守护所有 `/api/admin/*`（见 §6）；空=admin 接口开放（仅限本机开发） |
+| `ADMIN_TOKEN` | 空 | **已启用**：非空时守护所有 `/api/admin/*`（见 §6）；空时**只允许本机回环**访问，生产环境（`NODE_ENV=production`）直接 503 |
+| `REQUIRE_ADMIN_TOKEN` | 空 | 设为 `true` 时等效于"生产环境"：未配 `ADMIN_TOKEN` 就拒绝所有 admin 请求（见 §6） |
 | `FREE_CHANNEL_RPM` | 30 | 免费通道每分钟请求上限（进程内滑动窗口，保护第三方上游，见 §2） |
 | `QUOTA_WARN_PERCENT` | 80 | 配额使用率达到该百分比时写入一条 warning 告警（仅在跨越阈值那次请求触发，不重复刷） |
 | `GATEWAY_SECRET` | 空 | 密钥落库加密用的主密钥（任务 1.3）。空时**禁止**把明文 API key 写入数据库；改用 `apiKeyRefs` 引用环境变量则不需要它 |
+| `GATEWAY_SECRET_PREVIOUS` | 空 | 上一版主密钥，**只用于解密**（轮换过渡期，见 `docs/secrets-design.md` 第七节）；全部密文重加密后应删除 |
+| `ALLOW_MISSING_ENV_REFS` | 空 | 设 `true` 才允许 `apiKeyRefs` 引用当前没有值的环境变量（默认拒绝，返回 `ENV_REF_NOT_FOUND`） |
 
 ## 1. 数据表（`src/db/schema.sql` 为准，本节为摘要）
 
@@ -31,7 +34,13 @@
     旧 `apiKey` / `apiKeys` 明文仅为兼容存量、仍可读，但新写入一律加密；
     迁移用 `node scripts/migrate-secrets.mjs [--dry-run]`（幂等）
   - 写配置时的错误码：没配主密钥又提交明文 → `400` + `code: "NO_MASTER_KEY"`；
-    引用名不是合法环境变量名 → `400` + `code: "INVALID_REF_NAME"`
+    引用名不是合法环境变量名 → `400` + `code: "INVALID_REF_NAME"`；
+    引用**内部敏感变量**（`GATEWAY_SECRET` / `ADMIN_TOKEN` / `DATABASE_PASSWORD` 等，或名字含
+    `SECRET` / `PASSWORD` / `CREDENTIAL` / `PRIVATE_KEY`、以 `GATEWAY_` 开头）→ `400` + `code: "RESERVED_REF_NAME"`；
+    引用的变量当前没有值 → `400` + `code: "ENV_REF_NOT_FOUND"`（消息里点名缺哪个变量；
+    确需先写配置后注入密钥时设 `ALLOW_MISSING_ENV_REFS=true`）
+  - `apiKeyRefs` 只允许形如 `SPONSORED_KEY_1` 的变量名；接口响应会额外返回 `missingApiKeyRefs`
+    （引用了但环境里没有值的变量名，用于排障，不含值）
   - `GET /api/admin/channels`、`GET /api/dashboard/channels` 返回的 `config` 中密钥一律脱敏
     （形如 `sk-1…cdef`），不返回明文也不返回密文
 - `tokens`：`quota_limit` 单位为 LLM token 数（看板以 M 展示）；`used_count` 为请求次数
@@ -129,8 +138,17 @@ async forwardStream(payload) -> { success, stream, latency, channel }  // stream
 
 ## 6. Admin 鉴权（已实现：`src/middleware/adminAuth.js`）
 
-- 环境变量 `ADMIN_TOKEN`；未设置时 admin 接口保持开放（兼容现有 Demo/本机开发）
-- 设置后：所有 `/api/admin/*` 与未来的 `/api/dashboard/jev` 必须带 `x-admin-token: <ADMIN_TOKEN>`，否则 401 `{error:{type:'invalid_request_error'}}`
+- 环境变量 `ADMIN_TOKEN`；设置后：所有 `/api/admin/*` 与未来的 `/api/dashboard/jev` 必须带
+  `x-admin-token: <ADMIN_TOKEN>`，否则 401 `{error:{type:'invalid_request_error'}}`
+  （比较用 `crypto.timingSafeEqual`，长度不同直接判失败）
+- **未设置 `ADMIN_TOKEN` 时不再完全开放**（第二轮安全审查 1）：
+  - `NODE_ENV=production` 或 `REQUIRE_ADMIN_TOKEN=true` → 一律 **503**
+    `{error:{type:'configuration_error'}, code:"ADMIN_TOKEN_REQUIRED"}`（fail-closed，启动日志也会告警）
+  - 开发环境 → 只放行**本机回环**请求（`127.0.0.1` / `::1` / `::ffff:127.0.0.1`），
+    其他来源 **403** `{code:"ADMIN_TOKEN_REQUIRED"}`
+  - 注意：反向代理后部署时 `req.socket.remoteAddress` 是代理地址，会被判为非回环 → 生产必须配 token
+- 启动时会打印部署检查（`[Security]` 前缀）：`ADMIN_TOKEN` 是否缺、主密钥指纹（8 位、不含密钥）、
+  `.env` 权限（POSIX 判 `chmod 600`；Windows 提示用 `icacls` 自查）、`.env` 是否被 `.gitignore` 覆盖
 - 看板前端在 401 时弹出 token 输入框并存 localStorage（组员3 按此实现）
 
 ## 7. mock channel 行为规范（`test/mocks/mock-channel.mjs`）

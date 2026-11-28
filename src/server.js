@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import { initDb, getDb } from './db/index.js';
 import { loadChannels } from './services/channelRegistry.js';
 import { startHealthProbe, startBackupCron } from './services/backup.js';
+import { logStartupSecurityChecks } from './services/deployChecks.js';
 import proxyRoutes from './routes/proxy.js';
 import adminRoutes from './routes/admin.js';
 import dashboardRoutes from './routes/dashboard.js';
@@ -38,6 +39,9 @@ app.get('/health', (req, res) => {
 
 async function start() {
   try {
+    // 部署期安全检查（第二轮安全审查）：只提示、不阻断，生产环境由 adminAuth 兜底拒绝
+    logStartupSecurityChecks(join(__dirname, '..'));
+
     await initDb();
     await loadChannels();
     startHealthProbe();

@@ -9,15 +9,24 @@ import { dirname, join } from 'path';
 
 import {
   MASTER_KEY_ENV,
+  MASTER_KEY_PREVIOUS_ENV,
+  ALLOW_MISSING_ENV_REFS_ENV,
   ENCRYPTED_PREFIX,
+  RESERVED_ENV_REF_NAMES,
   SecretsError,
   hasMasterKey,
   getMasterKey,
+  getPreviousMasterKey,
+  getMasterKeyId,
   resetSecretCache,
   isEncrypted,
   isEnvRefName,
+  isReservedEnvRefName,
+  assertEnvRefName,
+  missingApiKeyRefs,
   encryptSecret,
   decryptSecret,
+  decryptSecretWithInfo,
   maskSecret,
   resolveApiKeyEntries,
   resolveApiKeys,
@@ -442,5 +451,218 @@ describe('data/ 目录不入库（验收第 3 条）', () => {
 
     assert.ok(lines.includes('data/'), '.gitignore 必须继续排除 data/');
     assert.ok(lines.includes('.env'), '.gitignore 必须继续排除 .env');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 第二轮安全审查（2026-11-28）
+// ---------------------------------------------------------------------------
+
+describe('环境变量引用限制（安全审查 3）', () => {
+  beforeEach(() => {
+    withMasterKey();
+    process.env.SPONSORED_KEY_1 = 'sk-sponsored-1';
+    process.env.AIPING_KEY_1 = 'sk-aiping-1';
+  });
+
+  afterEach(() => {
+    delete process.env.SPONSORED_KEY_1;
+    delete process.env.AIPING_KEY_1;
+    delete process.env.SOME_MISSING_KEY_1;
+    delete process.env[ALLOW_MISSING_ENV_REFS_ENV];
+    delete process.env.TEST_ENV_KEY;
+    withoutMasterKey();
+  });
+
+  test('内部敏感变量一律拒绝引用（GATEWAY_SECRET / ADMIN_TOKEN / DATABASE_PASSWORD）', () => {
+    for (const name of ['GATEWAY_SECRET', 'GATEWAY_SECRET_PREVIOUS', 'ADMIN_TOKEN', 'DATABASE_PASSWORD']) {
+      assert.throws(
+        () => sealIncomingConfig({ apiKeyRefs: [name] }),
+        (error) => {
+          assert.ok(error instanceof SecretsError);
+          assert.strictEqual(error.code, 'RESERVED_REF_NAME', `${name} 应被拒绝`);
+          return true;
+        }
+      );
+    }
+    // 这几个确实都在保留名单里（防止以后有人把名单改空）
+    for (const name of ['GATEWAY_SECRET', 'ADMIN_TOKEN', 'DATABASE_PASSWORD']) {
+      assert.ok(RESERVED_ENV_REF_NAMES.includes(name));
+      assert.strictEqual(isReservedEnvRefName(name), true);
+    }
+  });
+
+  test('名字里带 SECRET / PASSWORD，或以 GATEWAY_ 开头，也拒绝', () => {
+    for (const name of ['MY_SECRET_KEY', 'AIPING_PASSWORD', 'GATEWAY_FOO', 'X_CREDENTIAL_Y', 'APP_PRIVATE_KEY']) {
+      assert.strictEqual(isReservedEnvRefName(name), true, `${name} 应被拒绝`);
+      assert.throws(() => assertEnvRefName(name), (error) => error.code === 'RESERVED_REF_NAME');
+    }
+  });
+
+  test('正常业务变量名（*_KEY_n）不受影响', () => {
+    for (const name of ['SPONSORED_KEY_1', 'AIPING_KEY_1', 'TEST_ENV_KEY']) {
+      assert.strictEqual(isReservedEnvRefName(name), false);
+      assert.strictEqual(assertEnvRefName(` ${name} `), name, '应返回去掉空白后的名字');
+    }
+    assert.deepStrictEqual(
+      sealIncomingConfig({ apiKeyRefs: ['SPONSORED_KEY_1'] }).apiKeyRefs,
+      ['SPONSORED_KEY_1']
+    );
+  });
+
+  test('格式不合法的引用名仍是 INVALID_REF_NAME', () => {
+    assert.throws(
+      () => sealIncomingConfig({ apiKeyRefs: ['1INVALID'] }),
+      (error) => error.code === 'INVALID_REF_NAME'
+    );
+  });
+
+  test('引用的环境变量不存在 → ENV_REF_NOT_FOUND（明确报错，不静默跳过）', () => {
+    assert.throws(
+      () => sealIncomingConfig({ apiKeyRefs: ['SPONSORED_KEY_1', 'SOME_MISSING_KEY_1'] }),
+      (error) => {
+        assert.strictEqual(error.code, 'ENV_REF_NOT_FOUND');
+        assert.match(error.message, /SOME_MISSING_KEY_1/);
+        assert.ok(!error.message.includes('SPONSORED_KEY_1'), '已存在的变量不该出现在报错里');
+        return true;
+      }
+    );
+  });
+
+  test('变量存在但值为空也算"没配"', () => {
+    process.env.SOME_MISSING_KEY_1 = '   ';
+    assert.throws(
+      () => sealIncomingConfig({ apiKeyRefs: ['SOME_MISSING_KEY_1'] }),
+      (error) => error.code === 'ENV_REF_NOT_FOUND'
+    );
+  });
+
+  test('显式设 ALLOW_MISSING_ENV_REFS=true 时允许"先写配置后注入密钥"', () => {
+    process.env[ALLOW_MISSING_ENV_REFS_ENV] = 'true';
+    const sealed = sealIncomingConfig({ apiKeyRefs: ['SOME_MISSING_KEY_1'] });
+
+    assert.deepStrictEqual(sealed.apiKeyRefs, ['SOME_MISSING_KEY_1']);
+    // 但运行时解析不到值，并标记为缺失
+    const runtime = hydrateConfig(sealed);
+    assert.deepStrictEqual(runtime.apiKeys, []);
+    assert.deepStrictEqual(runtime.apiKeyRefsMissing, ['SOME_MISSING_KEY_1']);
+  });
+
+  test('存量库里若已有敏感引用，运行时拒绝解析（不因为旧数据放行）', () => {
+    const { keys, warnings } = resolveApiKeyEntries({ apiKeyRefs: ['GATEWAY_SECRET'] });
+
+    assert.deepStrictEqual(keys, []);
+    assert.ok(warnings.some((warning) => warning.includes('内部敏感变量')));
+  });
+
+  test('missingApiKeyRefs 只报缺失的变量名，不返回值', () => {
+    const missing = missingApiKeyRefs({ apiKeyRefs: ['SPONSORED_KEY_1', 'SOME_MISSING_KEY_1'] });
+
+    assert.deepStrictEqual(missing, ['SOME_MISSING_KEY_1']);
+    assert.ok(!JSON.stringify(missing).includes('sk-sponsored-1'));
+  });
+});
+
+describe('主密钥指纹与轮换过渡（安全审查 2 / 5）', () => {
+  afterEach(() => {
+    delete process.env[MASTER_KEY_ENV];
+    delete process.env[MASTER_KEY_PREVIOUS_ENV];
+    resetSecretCache();
+  });
+
+  test('指纹是 8 位十六进制、稳定、可区分不同主密钥，且不是密钥本身', () => {
+    withMasterKey();
+    const first = getMasterKeyId();
+    assert.match(first, /^[0-9a-f]{8}$/);
+    assert.strictEqual(getMasterKeyId(), first, '同一把主密钥指纹应稳定');
+    assert.ok(!TEST_SECRET.includes(first) && first !== TEST_SECRET.slice(0, 8), '指纹不能是密钥明文片段');
+
+    process.env[MASTER_KEY_ENV] = 'another-master-secret';
+    resetSecretCache();
+    assert.notStrictEqual(getMasterKeyId(), first);
+  });
+
+  test('密文只带版本号、不嵌指纹（轮换只能全量重加密，设计如此）', () => {
+    withMasterKey();
+    const cipher = encryptSecret('sk-format-check');
+
+    assert.ok(cipher.startsWith(ENCRYPTED_PREFIX));
+    assert.strictEqual(cipher.slice(ENCRYPTED_PREFIX.length).split(':').length, 3);
+    assert.ok(!cipher.includes(getMasterKeyId()));
+  });
+
+  test('配了 GATEWAY_SECRET_PREVIOUS：旧密文仍能解开并标记 usedPreviousKey', () => {
+    withMasterKey();
+    const oldCipher = encryptSecret('sk-before-rotation');
+
+    // 模拟轮换：新主密钥 + 旧主密钥放进 PREVIOUS
+    process.env[MASTER_KEY_ENV] = 'brand-new-master-secret';
+    process.env[MASTER_KEY_PREVIOUS_ENV] = TEST_SECRET;
+    resetSecretCache();
+
+    const info = decryptSecretWithInfo(oldCipher);
+    assert.strictEqual(info.plain, 'sk-before-rotation');
+    assert.strictEqual(info.usedPreviousKey, true);
+    assert.strictEqual(decryptSecret(oldCipher), 'sk-before-rotation');
+
+    // 新密文用当前主密钥，不应走 PREVIOUS
+    const newCipher = encryptSecret('sk-after-rotation');
+    assert.strictEqual(decryptSecretWithInfo(newCipher).usedPreviousKey, false);
+  });
+
+  test('没配 GATEWAY_SECRET_PREVIOUS 时旧密文解不开（DECRYPT_FAILED，不吐明文）', () => {
+    withMasterKey();
+    const oldCipher = encryptSecret('sk-old');
+
+    process.env[MASTER_KEY_ENV] = 'brand-new-master-secret';
+    resetSecretCache();
+
+    assert.throws(
+      () => decryptSecret(oldCipher),
+      (error) => {
+        assert.strictEqual(error.code, 'DECRYPT_FAILED');
+        assert.ok(!error.message.includes('sk-old'));
+        return true;
+      }
+    );
+  });
+
+  test('getPreviousMasterKey 没配时返回 null', () => {
+    withMasterKey();
+    assert.strictEqual(getPreviousMasterKey(), null);
+  });
+
+  test('错误信息里不出现主密钥与明文（不落普通日志的前提）', () => {
+    withMasterKey();
+    const cipher = encryptSecret('sk-error-check');
+
+    const errors = [];
+    try { decryptSecret('not-a-cipher'); } catch (error) { errors.push(error); }
+    try { decryptSecret(cipher.slice(0, -4) + 'AAAA'); } catch (error) { errors.push(error); }
+    const savedSecret = process.env[MASTER_KEY_ENV];
+    delete process.env[MASTER_KEY_ENV];
+    resetSecretCache();
+    try { decryptSecret(cipher); } catch (error) { errors.push(error); }
+    process.env[MASTER_KEY_ENV] = savedSecret;
+    resetSecretCache();
+
+    assert.strictEqual(errors.length, 3);
+    for (const error of errors) {
+      const text = `${error.name}: ${error.message}`;
+      assert.ok(!text.includes('sk-error-check'), '错误信息不得含明文密钥');
+      assert.ok(!text.includes(savedSecret), '错误信息不得含主密钥');
+    }
+  });
+
+  test('hydrateConfig 暴露缺失引用；落库与对外输出都不带它', () => {
+    withMasterKey();
+    const runtime = hydrateConfig({ apiKeyRefs: ['SOME_MISSING_KEY_1'] });
+
+    assert.deepStrictEqual(runtime.apiKeyRefsMissing, ['SOME_MISSING_KEY_1']);
+    assert.strictEqual(toPersistableConfig(runtime).apiKeyRefsMissing, undefined);
+
+    const output = sanitizeConfigForOutput(runtime);
+    assert.deepStrictEqual(output.missingApiKeyRefs, ['SOME_MISSING_KEY_1']);
+    assert.strictEqual(output.apiKeyRefsMissing, undefined);
   });
 });

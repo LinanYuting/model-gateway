@@ -13,12 +13,40 @@
 // 存量兼容：旧的 apiKey / apiKeys 明文仍然可读（第三优先级），但只当作过渡路径，
 // 由 scripts/migrate-secrets.mjs 一次性加密改写，或在管理员改配置时自动加密。
 
-import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto';
+import { randomBytes, createCipheriv, createDecipheriv, scryptSync, createHash } from 'crypto';
 
 /** 主密钥所在的环境变量名 */
 export const MASTER_KEY_ENV = 'GATEWAY_SECRET';
+/**
+ * 上一版主密钥（可选，只用于**解密**）。
+ * 轮换主密钥时的过渡手段：新密钥放进 GATEWAY_SECRET、旧密钥放进这里，
+ * 进程就能同时解开新旧密文；下一阶段的 rotate-secret.mjs 全量重加密完成后撤掉它。
+ */
+export const MASTER_KEY_PREVIOUS_ENV = 'GATEWAY_SECRET_PREVIOUS';
+/** 允许在密钥没准备好时就先写 apiKeyRefs（默认不允许，见 sealIncomingConfig） */
+export const ALLOW_MISSING_ENV_REFS_ENV = 'ALLOW_MISSING_ENV_REFS';
 /** 密文前缀，带版本号方便以后换算法 */
 export const ENCRYPTED_PREFIX = 'enc:v1:';
+
+/**
+ * 禁止被 apiKeyRefs 引用的环境变量（第二轮安全审查第 3 条）：
+ * 这些是网关自己的凭据/配置，一旦允许通道引用，等于把"读取主密钥或后台令牌"的通道打开。
+ */
+export const RESERVED_ENV_REF_NAMES = Object.freeze([
+  MASTER_KEY_ENV,
+  MASTER_KEY_PREVIOUS_ENV,
+  'ADMIN_TOKEN',
+  'DATABASE_PASSWORD',
+  'DATABASE_URL',
+  'DB_PASSWORD',
+  'JWT_SECRET',
+  'SESSION_SECRET',
+  'NODE_OPTIONS',
+  'PATH'
+]);
+
+// 名字里带这些词的也不许引用：宁可让运维换个名字，也不留"顺手引用到别处凭据"的口子。
+const RESERVED_ENV_REF_PATTERNS = [/SECRET/i, /PASSWORD/i, /CREDENTIAL/i, /PRIVATE_KEY/i, /^GATEWAY_/];
 
 const ALGORITHM = 'aes-256-gcm';
 const KEY_BYTES = 32;
@@ -36,31 +64,55 @@ export class SecretsError extends Error {
 }
 
 // 派生密钥有点慢（scrypt），按 secret 值缓存，换 secret 自动失效。
-let cachedKey = null; // { secret, key }
+const keyCache = new Map(); // secret -> key
 
 /** 仅测试用：清掉派生密钥缓存 */
 export function resetSecretCache() {
-  cachedKey = null;
+  keyCache.clear();
 }
 
-/** 主密钥；没配或为空返回 null */
-export function getMasterKey() {
-  const secret = String(process.env[MASTER_KEY_ENV] ?? '').trim();
-  if (!secret) return null;
-  if (cachedKey && cachedKey.secret === secret) return cachedKey.key;
+function deriveKey(secret) {
+  if (keyCache.has(secret)) return keyCache.get(secret);
 
   // 允许直接给 64 位十六进制密钥，省一次 scrypt；否则把口令拉伸成 32 字节
   const key = /^[0-9a-fA-F]{64}$/.test(secret)
     ? Buffer.from(secret, 'hex')
     : scryptSync(secret, KDF_SALT, KEY_BYTES);
 
-  cachedKey = { secret, key };
+  keyCache.set(secret, key);
   return key;
+}
+
+function readSecret(envName) {
+  const secret = String(process.env[envName] ?? '').trim();
+  return secret || null;
+}
+
+/** 主密钥；没配或为空返回 null */
+export function getMasterKey() {
+  const secret = readSecret(MASTER_KEY_ENV);
+  return secret ? deriveKey(secret) : null;
+}
+
+/** 上一版主密钥（轮换过渡期用）；没配返回 null */
+export function getPreviousMasterKey() {
+  const secret = readSecret(MASTER_KEY_PREVIOUS_ENV);
+  return secret ? deriveKey(secret) : null;
 }
 
 /** 是否配置了主密钥 */
 export function hasMasterKey() {
   return getMasterKey() !== null;
+}
+
+/**
+ * 主密钥指纹：sha256(派生后的 32 字节) 的前 8 位十六进制。
+ * 只用来在日志/备份说明/轮换报告里标注"这批密文是哪把主密钥做的"，**不能反推密钥**。
+ * 密文本身不嵌入指纹（格式仍是 enc:v1:…），所以轮换只能全量重加密——见 docs/secrets-design.md 第七节。
+ */
+export function getMasterKeyId(key = getMasterKey()) {
+  if (!key) return null;
+  return createHash('sha256').update(key).digest('hex').slice(0, 8);
 }
 
 /** 这个值是不是本模块产出的密文 */
@@ -71,6 +123,48 @@ export function isEncrypted(value) {
 /** 合法环境变量名（用作 apiKeyRefs 的元素） */
 export function isEnvRefName(name) {
   return typeof name === 'string' && ENV_REF_PATTERN.test(name.trim());
+}
+
+/** 是不是被禁止引用的内部敏感变量（第二轮安全审查第 3 条） */
+export function isReservedEnvRefName(name) {
+  if (typeof name !== 'string') return true;
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  if (RESERVED_ENV_REF_NAMES.includes(trimmed)) return true;
+  return RESERVED_ENV_REF_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+/**
+ * 校验一个 apiKeyRefs 元素：格式 + 是否内部敏感变量。不合法直接抛，错误码可区分。
+ * @returns {string} 规范化后的变量名
+ */
+export function assertEnvRefName(name) {
+  if (!isEnvRefName(name)) {
+    throw new SecretsError(
+      `apiKeyRefs 中的 "${name}" 不是合法的环境变量名（只允许字母、数字、下划线，且不能以数字开头）`,
+      'INVALID_REF_NAME'
+    );
+  }
+  const trimmed = name.trim();
+  if (isReservedEnvRefName(trimmed)) {
+    throw new SecretsError(
+      `apiKeyRefs 不允许引用内部敏感变量 "${trimmed}"（主密钥、后台令牌、数据库口令等不能当通道密钥用）`,
+      'RESERVED_REF_NAME'
+    );
+  }
+  return trimmed;
+}
+
+/** 引用了但当前进程环境里没有值的变量名（用于提示与接口展示，只返回名字） */
+export function missingApiKeyRefs(config = {}) {
+  const missing = [];
+  for (const ref of toArray(config.apiKeyRefs)) {
+    if (!isEnvRefName(ref)) continue;
+    const name = ref.trim();
+    const value = process.env[name];
+    if (typeof value !== 'string' || value.trim() === '') missing.push(name);
+  }
+  return missing;
 }
 
 /**
@@ -100,11 +194,35 @@ export function encryptSecret(plain) {
 }
 
 /**
- * 解密。
+ * 解密（只要明文）。
  * @param {string} payload
  * @returns {string} 明文
  */
 export function decryptSecret(payload) {
+  return decryptSecretWithInfo(payload).plain;
+}
+
+function decryptWithKey(payload, key) {
+  const parts = payload.slice(ENCRYPTED_PREFIX.length).split(':');
+  if (parts.length !== 3) {
+    throw new SecretsError('密文格式不正确，应为 enc:v1:<iv>:<tag>:<密文>', 'INVALID_CIPHERTEXT');
+  }
+  const [ivPart, tagPart, dataPart] = parts;
+  const decipher = createDecipheriv(ALGORITHM, key, Buffer.from(ivPart, 'base64url'));
+  decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(dataPart, 'base64url')),
+    decipher.final()
+  ]).toString('utf8');
+}
+
+/**
+ * 解密并告诉调用方"是哪把主密钥解开的"（轮换报告 / 迁移校验用）。
+ * 顺手支持 GATEWAY_SECRET_PREVIOUS：主密钥换到一半时新旧密文都能读。
+ *
+ * @returns {{ plain: string, keyId: string, usedPreviousKey: boolean }}
+ */
+export function decryptSecretWithInfo(payload) {
   if (!isEncrypted(payload)) {
     throw new SecretsError('不是本模块生成的密文（缺少 enc:v1: 前缀）', 'INVALID_CIPHERTEXT');
   }
@@ -114,20 +232,24 @@ export function decryptSecret(payload) {
     throw new SecretsError(`未配置 ${MASTER_KEY_ENV}，无法解密密钥`, 'NO_MASTER_KEY');
   }
 
-  const parts = payload.slice(ENCRYPTED_PREFIX.length).split(':');
-  if (parts.length !== 3) {
-    throw new SecretsError('密文格式不正确，应为 enc:v1:<iv>:<tag>:<密文>', 'INVALID_CIPHERTEXT');
-  }
-
-  const [ivPart, tagPart, dataPart] = parts;
   try {
-    const decipher = createDecipheriv(ALGORITHM, key, Buffer.from(ivPart, 'base64url'));
-    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
-    return Buffer.concat([
-      decipher.update(Buffer.from(dataPart, 'base64url')),
-      decipher.final()
-    ]).toString('utf8');
-  } catch (_error) {
+    return { plain: decryptWithKey(payload, key), keyId: getMasterKeyId(key), usedPreviousKey: false };
+  } catch (error) {
+    // 格式错直接抛，不用拿上一版密钥再试一遍
+    if (error.code === 'INVALID_CIPHERTEXT') throw error;
+
+    const previousKey = getPreviousMasterKey();
+    if (previousKey) {
+      try {
+        return {
+          plain: decryptWithKey(payload, previousKey),
+          keyId: getMasterKeyId(previousKey),
+          usedPreviousKey: true
+        };
+      } catch (_previousError) {
+        // 落到下面统一报错
+      }
+    }
     // 换过主密钥、密文被改过、数据损坏都会走到这里
     throw new SecretsError('密钥解密失败：主密钥不匹配或密文已损坏', 'DECRYPT_FAILED');
   }
@@ -194,6 +316,11 @@ export function resolveApiKeyEntries(config = {}) {
       continue;
     }
     const name = ref.trim();
+    // 内部敏感变量绝不当通道密钥用（存量库里万一有，也一律不解析）
+    if (isReservedEnvRefName(name)) {
+      warnings.push(`apiKeyRefs 中的 "${name}" 是内部敏感变量，已拒绝解析`);
+      continue;
+    }
     const value = process.env[name];
     if (typeof value !== 'string' || value.trim() === '') {
       warnings.push(`环境变量 ${name} 未设置或为空，该引用已跳过`);
@@ -234,7 +361,9 @@ export function hydrateConfig(config = {}) {
     ...config,
     apiKey: keys[0] || '',
     apiKeys: keys,
-    apiKeySources: sources
+    apiKeySources: sources,
+    // 引用了但环境里没有的变量名：让运维一眼看出"配了但没生效"
+    apiKeyRefsMissing: missingApiKeyRefs(config)
   };
 }
 
@@ -244,6 +373,7 @@ export function toPersistableConfig(config = {}) {
   delete out.apiKey;
   delete out.apiKeys;
   delete out.apiKeySources;
+  delete out.apiKeyRefsMissing;
   return out;
 }
 
@@ -264,15 +394,27 @@ export function sealIncomingConfig(incoming = {}) {
   if (hasRefs) {
     const refs = [];
     for (const ref of incoming.apiKeyRefs) {
-      if (!isEnvRefName(ref)) {
-        throw new SecretsError(
-          `apiKeyRefs 中的 "${ref}" 不是合法的环境变量名（只允许字母、数字、下划线，且不能以数字开头）`,
-          'INVALID_REF_NAME'
-        );
-      }
-      const name = ref.trim();
+      const name = assertEnvRefName(ref); // 格式 + 内部敏感变量双重校验，不合法直接抛
       if (!refs.includes(name)) refs.push(name);
     }
+
+    // 第二轮安全审查第 3 条：引用的变量当前必须真的存在，否则"配了等于没配"。
+    // 需要"先写配置、后注入密钥"的部署顺序时，显式设 ALLOW_MISSING_ENV_REFS=true 放行。
+    const allowMissing = process.env[ALLOW_MISSING_ENV_REFS_ENV] === 'true';
+    if (!allowMissing) {
+      const missing = refs.filter((name) => {
+        const value = process.env[name];
+        return typeof value !== 'string' || value.trim() === '';
+      });
+      if (missing.length > 0) {
+        throw new SecretsError(
+          `apiKeyRefs 引用的环境变量没有值：${missing.join(', ')}（请先设置，或改用 apiKeys 加密落库；`
+          + `确实要先写配置后注入密钥，可设 ${ALLOW_MISSING_ENV_REFS_ENV}=true）`,
+          'ENV_REF_NOT_FOUND'
+        );
+      }
+    }
+
     sealed.apiKeyRefs = refs;
     if (refs.length > 0) {
       // 引用优先：显式清掉密文，避免“环境变量 + 密文”两套来源同时生效
@@ -324,6 +466,8 @@ export function sanitizeConfigForOutput(config = {}) {
   out.apiKey = keys[0] ? maskSecret(keys[0]) : '';
   out.apiKeys = keys.map(maskSecret);
   out.apiKeyRefs = Array.isArray(config.apiKeyRefs) ? [...config.apiKeyRefs] : [];
+  // 只暴露"哪些引用没生效"的变量名，不暴露值
+  out.missingApiKeyRefs = missingApiKeyRefs(config);
   out.keyCount = keys.length;
   return out;
 }

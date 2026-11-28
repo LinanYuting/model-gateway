@@ -188,4 +188,32 @@ describe('密钥存储安全化 · 管理接口', () => {
     assert.strictEqual(res.status, 400);
     assert.strictEqual(json.code, 'INVALID_REF_NAME');
   });
+
+  test('引用内部敏感变量：400 + code=RESERVED_REF_NAME（不许把主密钥当通道密钥）', async () => {
+    for (const name of ['GATEWAY_SECRET', 'ADMIN_TOKEN', 'DATABASE_PASSWORD']) {
+      const { res, json } = await putChannel('sponsored', { config: { apiKeyRefs: [name] } });
+      assert.strictEqual(res.status, 400, `${name} 应被拒绝`);
+      assert.strictEqual(json.code, 'RESERVED_REF_NAME');
+      assert.strictEqual(typeof json.error, 'string', '错误体形状保持不变');
+    }
+    // 拒绝后库里没有留下这次写入
+    assert.ok(!channelRowJson('sponsored').includes('GATEWAY_SECRET'));
+  });
+
+  test('引用不存在的环境变量：400 + code=ENV_REF_NOT_FOUND，错误信息点名变量', async () => {
+    const { res, json } = await putChannel('sponsored', {
+      config: { apiKeyRefs: ['ADMIN_TEST_MISSING_KEY_9'] }
+    });
+
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(json.code, 'ENV_REF_NOT_FOUND');
+    assert.strictEqual(typeof json.error, 'string');
+    assert.ok(json.error.includes('ADMIN_TEST_MISSING_KEY_9'), json.error);
+    assert.ok(!channelRowJson('sponsored').includes('ADMIN_TEST_MISSING_KEY_9'));
+  });
+
+  test('管理接口无 token 时 401（安全审查 1 的 HTTP 层验证）', async () => {
+    const res = await fetch(`${baseUrl}/api/admin/channels`);
+    assert.strictEqual(res.status, 401);
+  });
 });
